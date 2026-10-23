@@ -28,6 +28,7 @@ select{flex:0 0 42%}
 input:focus,select:focus,button:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
 .chips{display:flex;gap:6px;overflow-x:auto;padding:10px 12px;scrollbar-width:none}
 .chips::-webkit-scrollbar{display:none}
+.chips.open{flex-wrap:wrap;overflow:visible}
 .chip{flex:none;border:1px solid var(--line);background:none;color:var(--dim);border-radius:99px;padding:7px 13px;font:inherit;font-size:13px;cursor:pointer}
 .chip.on{background:var(--accent);border-color:var(--accent);color:#1a1300;font-weight:600}
 .count{padding:0 12px 6px;font-size:12px;color:var(--dim)}
@@ -116,13 +117,21 @@ function parseM3U(text) {
       cur = null;
     }
   }
-  return [...map.values()].filter(c => !c.categories.includes("xxx"));
+  const animeRx = /anime|animax|crunchyroll|manga|otaku|toonami|naruto|pokemon|dragon ?ball|gundam|doraemon|one piece/i;
+  const sportRx = /sport|espn|football|soccer|nba|nfl|ufc|wwe|golf|tennis|racing|motogp|fight/i;
+  const out = [...map.values()].filter(c => !c.categories.includes("xxx"));
+  out.forEach(c => {
+    if (animeRx.test(c.name) && !c.categories.includes("anime")) c.categories.push("anime");
+    if (sportRx.test(c.name) && !c.categories.includes("sports")) c.categories.push("sports");
+  });
+  return out;
 }
 
 async function init() {
   try {
     const [txt, fv] = await Promise.all([fetch(PLAYLIST).then(r => r.text()), store.get("favs")]);
     try { favs = new Set(JSON.parse(fv || "[]")); } catch (e) {}
+    try { const d = JSON.parse(localStorage.getItem("dead") || "{}"); for (const k in d) if (Date.now() - d[k] < 43200000) dead.add(k); } catch (e) {}
     channels = parseM3U(txt).sort((a, b) => a.name.localeCompare(b.name));
     buildFilters();
     render();
@@ -131,17 +140,22 @@ async function init() {
   }
 }
 
+const ICONS = {sports:"⚽",anime:"🎌",movies:"🎬",news:"📰",kids:"🧸",music:"🎵",animation:"✨",documentary:"🌍",comedy:"😂",cooking:"🍳",religious:"🙏",weather:"⛅",education:"🎓",science:"🔬",travel:"✈️",auto:"🚗",business:"💼",series:"📺",family:"👨‍👩‍👧",entertainment:"🎭",lifestyle:"🌿",outdoor:"🏕️",classic:"📼",culture:"🎨",relax:"😌",shop:"🛍️",legislative:"🏛️",general:"📡",public:"🏙️",interactive:"🎮"};
+const FIRST = ["sports","anime","movies","news","kids","music","animation","entertainment","documentary","series","comedy"];
+
 function buildFilters() {
   const countries = [...new Set(channels.map(c => c.country).filter(Boolean))]
     .map(c => [c, regionName(c)]).sort((a, b) => a[1].localeCompare(b[1]));
   $("country").insertAdjacentHTML("beforeend", countries.map(([c, n]) => `<option value="${esc(c)}">${esc(n)}</option>`).join(""));
   const tally = {};
-  channels.forEach(c => (c.categories || []).forEach(k => tally[k] = (tally[k] || 0) + 1));
-  const cats = Object.keys(tally).sort((a, b) => tally[b] - tally[a]).slice(0, 14);
-  const label = k => k.charAt(0).toUpperCase() + k.slice(1);
+  channels.forEach(c => c.categories.forEach(k => tally[k] = (tally[k] || 0) + 1));
+  const rest = Object.keys(tally).filter(k => !FIRST.includes(k)).sort((a, b) => tally[b] - tally[a]);
+  const cats = FIRST.filter(k => tally[k]).concat(rest);
+  const label = k => (ICONS[k] ? ICONS[k] + " " : "") + k.charAt(0).toUpperCase() + k.slice(1) + " " + tally[k];
   $("chips").innerHTML =
-    `<button class="chip on" data-c="all">All</button><button class="chip" data-c="__fav">★ Favorites</button>` +
-    cats.map(k => `<button class="chip" data-c="${esc(k)}">${esc(label(k))}</button>`).join("");
+    `<button class="chip on" data-c="all">All ${channels.length}</button><button class="chip" data-c="__fav">★ Favorites</button>` +
+    cats.map(k => `<button class="chip" data-c="${esc(k)}">${esc(label(k))}</button>`).join("") +
+    `<button class="chip" data-more="1">More ▾</button>`;
 }
 
 function filtered() {
@@ -195,6 +209,7 @@ function next() {
   if (idx + 1 < urls.length) { idx++; start(); return; }
   stop();
   dead.add(state.playing);
+  try { const d = JSON.parse(localStorage.getItem("dead") || "{}"); d[state.playing] = Date.now(); localStorage.setItem("dead", JSON.stringify(d)); } catch (e) {}
   showMsg("This channel isn't working right now. Try another one.");
   render();
 }
@@ -219,6 +234,7 @@ $("q").addEventListener("input", e => { state.q = e.target.value; state.shown = 
 $("country").addEventListener("change", e => { state.country = e.target.value; state.shown = 60; render(); });
 $("chips").addEventListener("click", e => {
   const b = e.target.closest(".chip"); if (!b) return;
+  if (b.dataset.more) { const o = $("chips").classList.toggle("open"); b.textContent = o ? "Less ▴" : "More ▾"; return; }
   document.querySelectorAll(".chip").forEach(x => x.classList.toggle("on", x === b));
   state.cat = b.dataset.c; state.shown = 60; render();
 });
