@@ -51,6 +51,7 @@ input:focus,select:focus,button:focus-visible{outline:2px solid var(--accent);ou
   <video id="v" controls playsinline autoplay></video>
   <div class="now"><i class="dot"></i><span id="nowname"></span><button class="star" id="nowstar" aria-label="Favorite">★</button><button class="star" id="close" aria-label="Close player">✕</button></div>
   <div class="msg" id="msg"></div>
+  <button class="more" id="copyList" hidden style="margin:10px 12px">Copy playlist link for VLC</button>
 </div>
 <header>
   <h1>Live TV</h1>
@@ -88,11 +89,11 @@ const esc = s => String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">"
 const regionName = (() => { try { const d = new Intl.DisplayNames(["en"], {type: "region"}); return c => { try { return d.of(c) || c; } catch (e) { return c; } }; } catch (e) { return c => c; } })();
 
 let channels = [], streams = {}, favs = new Set(), dead = new Set();
-let state = {q: "", country: "", cat: "all", shown: 60, playing: null};
+let state = {q: "", country: "", cat: "all", shown: 60, playing: null, all: false};
 let hls = null, urls = [], idx = 0;
 
 function parseM3U(text) {
-  const map = new Map();
+  const map = new Map(), up = {};
   let cur = null, skip = false;
   for (const raw of text.split(/\r?\n/)) {
     const l = raw.trim();
@@ -104,15 +105,16 @@ function parseM3U(text) {
     } else if (l.startsWith("#EXTVLCOPT")) {
       skip = true; // stream needs special headers, can't play in a browser
     } else if (l[0] !== "#" && cur) {
-      if (!skip && l.startsWith("https://")) {
-        const key = cur.tvg || cur.name;
-        if (!map.has(key)) {
-          const m = cur.tvg.match(/\.([a-z]{2})(?:@|$)/i);
-          map.set(key, {id: key, name: cur.name, logo: cur.logo, country: m ? m[1].toUpperCase() : "",
-            categories: cur.group.split(";").map(x => x.trim().toLowerCase()).filter(x => x && x !== "undefined")});
-          streams[key] = [];
-        }
-        streams[key].push(l);
+      const key = cur.tvg || cur.name;
+      if (!map.has(key)) {
+        const m = cur.tvg.match(/\.([a-z]{2})(?:@|$)/i);
+        map.set(key, {id: key, name: cur.name, logo: cur.logo, country: m ? m[1].toUpperCase() : "",
+          categories: cur.group.split(";").map(x => x.trim().toLowerCase()).filter(x => x && x !== "undefined")});
+        streams[key] = []; up[key] = [];
+      }
+      if (!skip) {
+        if (l.startsWith("https://")) streams[key].push(l);
+        else if (l.startsWith("http://")) up[key].push("https://" + l.slice(7)); // try the secure version of http streams
       }
       cur = null;
     }
@@ -120,6 +122,10 @@ function parseM3U(text) {
   const animeRx = /anime|animax|crunchyroll|manga|otaku|toonami|naruto|pokemon|dragon ?ball|gundam|doraemon|one piece/i;
   const sportRx = /sport|espn|football|soccer|nba|nfl|ufc|wwe|golf|tennis|racing|motogp|fight/i;
   const out = [...map.values()].filter(c => !c.categories.includes("xxx"));
+  out.forEach(c => { // channels with no browser-playable stream are marked "native" (VLC only)
+    streams[c.id] = streams[c.id].concat(up[c.id]);
+    c.native = !streams[c.id].length;
+  });
   out.forEach(c => {
     if (animeRx.test(c.name) && !c.categories.includes("anime")) c.categories.push("anime");
     if (sportRx.test(c.name) && !c.categories.includes("sports")) c.categories.push("sports");
@@ -155,13 +161,13 @@ function buildFilters() {
   $("chips").innerHTML =
     `<button class="chip on" data-c="all">All ${channels.length}</button><button class="chip" data-c="__fav">★ Favorites</button>` +
     cats.map(k => `<button class="chip" data-c="${esc(k)}">${esc(label(k))}</button>`).join("") +
-    `<button class="chip" data-more="1">More ▾</button>`;
+    `<button class="chip" data-all="1">🔒 Show all</button><button class="chip" data-more="1">More ▾</button>`;
 }
 
 function filtered() {
   const q = state.q.trim().toLowerCase();
   return channels.filter(c =>
-    !dead.has(c.id) &&
+    (state.all || (!c.native && !dead.has(c.id))) &&
     (!q || c.name.toLowerCase().includes(q)) &&
     (!state.country || c.country === state.country) &&
     (state.cat === "all" || (state.cat === "__fav" ? favs.has(c.id) : (c.categories || []).includes(state.cat)))
@@ -174,7 +180,7 @@ function render() {
   const html = list.slice(0, state.shown).map(c => {
     const logo = c.logo ? `<img class="logo" src="${esc(c.logo)}" alt="" loading="lazy" onerror="this.outerHTML='<div class=ph>${esc(c.name.charAt(0))}</div>'">` : `<div class="ph">${esc(c.name.charAt(0))}</div>`;
     return `<div class="ch${state.playing === c.id ? " play" : ""}" data-id="${esc(c.id)}" role="button" tabindex="0">${logo}
-      <div class="meta"><div class="name">${esc(c.name)}</div><div class="sub">${esc(c.country ? regionName(c.country) : "International")}</div></div>
+      <div class="meta"><div class="name">${esc(c.name)}</div><div class="sub">${esc(c.country ? regionName(c.country) : "International")}${c.native ? " · 🔒 VLC only" : ""}</div></div>
       <button class="star${favs.has(c.id) ? " on" : ""}" data-fav="${esc(c.id)}" aria-label="Favorite">★</button></div>`;
   }).join("");
   $("list").innerHTML = html || `<div class="empty">${state.cat === "__fav" ? "No favorites yet. Tap ★ on a channel to save it." : "No channels match your search."}</div>`;
@@ -197,6 +203,9 @@ function play(id) {
   $("nowname").textContent = ch.name;
   $("nowstar").classList.toggle("on", favs.has(id));
   window.scrollTo({top: 0, behavior: "smooth"});
+  $("v").style.display = ch.native ? "none" : "block";
+  $("copyList").hidden = !ch.native;
+  if (ch.native) { stop(); showMsg("This channel can't play inside Telegram because it needs special headers or isn't secure. Open the full playlist in VLC to watch it."); render(); return; }
   start(); render();
 }
 
@@ -210,7 +219,8 @@ function next() {
   stop();
   dead.add(state.playing);
   try { const d = JSON.parse(localStorage.getItem("dead") || "{}"); d[state.playing] = Date.now(); localStorage.setItem("dead", JSON.stringify(d)); } catch (e) {}
-  showMsg("This channel isn't working right now. Try another one.");
+  showMsg("This channel isn't working here. It may be geo-restricted or need a native player like VLC.");
+  $("copyList").hidden = false;
   render();
 }
 
@@ -235,7 +245,8 @@ $("country").addEventListener("change", e => { state.country = e.target.value; s
 $("chips").addEventListener("click", e => {
   const b = e.target.closest(".chip"); if (!b) return;
   if (b.dataset.more) { const o = $("chips").classList.toggle("open"); b.textContent = o ? "Less ▴" : "More ▾"; return; }
-  document.querySelectorAll(".chip").forEach(x => x.classList.toggle("on", x === b));
+  if (b.dataset.all) { state.all = !state.all; b.classList.toggle("on", state.all); state.shown = 60; render(); return; }
+  document.querySelectorAll(".chip[data-c]").forEach(x => x.classList.toggle("on", x === b));
   state.cat = b.dataset.c; state.shown = 60; render();
 });
 $("list").addEventListener("click", e => {
@@ -245,6 +256,10 @@ $("list").addEventListener("click", e => {
 });
 $("list").addEventListener("keydown", e => { if (e.key === "Enter") { const c = e.target.closest(".ch"); if (c) play(c.dataset.id); } });
 $("more").addEventListener("click", () => { state.shown += 60; render(); });
+$("copyList").addEventListener("click", () => {
+  const done = () => showMsg("Playlist link copied. In VLC: Media → Open Network Stream → paste it.");
+  try { navigator.clipboard.writeText(PLAYLIST).then(done, done); } catch (e) { done(); }
+});
 $("nowstar").addEventListener("click", () => state.playing && toggleFav(state.playing));
 $("close").addEventListener("click", () => { stop(); state.playing = null; showMsg(""); $("player").classList.remove("on"); render(); });
 
