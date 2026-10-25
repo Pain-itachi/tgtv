@@ -55,12 +55,17 @@ input:focus,select:focus,button:focus-visible{outline:2px solid var(--accent);ou
 :root[data-theme=light]{--bg:#f4f5f9;--panel:#ffffff;--line:#e1e4ee;--text:#151722;--dim:#666c82;color-scheme:light}
 :root[data-theme=light] .msg{color:#b45309}
 :root[data-theme=light] .logo,:root[data-theme=light] .rc img{border:1px solid var(--line)}
+.now{flex-direction:column;align-items:stretch;gap:0;padding:6px 12px 2px}
+.nl{display:flex;align-items:center;gap:8px;padding:2px 0}
+.ctl{display:flex;justify-content:space-between}
+.now .star{padding:6px 8px}
+.player.compact video{max-height:24vh}
 </style>
 </head>
 <body>
 <div class="player" id="player">
   <video id="v" controls playsinline autoplay></video>
-  <div class="now"><i class="dot"></i><span id="nowname"></span><button class="star" id="share" aria-label="Share channel">📨</button><button class="star" id="pip" aria-label="Picture in picture" hidden>🗗</button><button class="star" id="fs" aria-label="Fullscreen">⛶</button><button class="star" id="nowstar" aria-label="Favorite">★</button><button class="star" id="close" aria-label="Close player">✕</button></div>
+  <div class="now"><div class="nl"><i class="dot"></i><span id="nowname"></span></div><div class="ctl"><button class="star" id="prev" aria-label="Previous channel">⏮</button><button class="star" id="nxt" aria-label="Next channel">⏭</button><button class="star" id="mute" aria-label="Sound">🔊</button><button class="star" id="share" aria-label="Share channel">📨</button><button class="star" id="pip" aria-label="Picture in picture" hidden>🗗</button><button class="star" id="fs" aria-label="Fullscreen">⛶</button><button class="star" id="nowstar" aria-label="Favorite">★</button><button class="star" id="close" aria-label="Close player">✕</button></div></div>
   <div class="msg" id="msg"></div>
 </div>
 <header>
@@ -78,7 +83,7 @@ input:focus,select:focus,button:focus-visible{outline:2px solid var(--accent);ou
 
 <script>
 const PLAYLIST = "https://iptv-org.github.io/iptv/index.m3u";
-// ⚠️ Put your own app link here so the 📨 Share button works, e.g. "https://t.me/yourbotname/tv"
+// Your app link, used by the 📨 Share button
 const BOT_LINK = "https://t.me/TGTelebot/Aio";
 const tg = window.Telegram && window.Telegram.WebApp;
 try { tg && (tg.ready(), tg.expand()); } catch (e) {}
@@ -103,7 +108,7 @@ const regionName = (() => { try { const d = new Intl.DisplayNames(["en"], {type:
 
 let channels = [], streams = {}, favs = new Set(), dead = new Set();
 let state = {q: "", country: "", cat: "all", shown: 60, playing: null, all: false};
-let hls = null, urls = [], idx = 0;
+let hls = null, urls = [], idx = 0, wd = null, deadline = 0, welcomeMode = false, welcomeQ = [];
 
 function parseM3U(text) {
   const map = new Map(), up = {};
@@ -146,16 +151,31 @@ function parseM3U(text) {
   return out;
 }
 
+async function getPlaylist() {
+  let c = null; try { c = await caches.open("tv-v1"); } catch (e) {}
+  let at = 0; try { at = +localStorage.getItem("plAt") || 0; } catch (e) {}
+  if (c && Date.now() - at < 6 * 3600e3) { try { const r = await c.match(PLAYLIST); if (r) return await r.text(); } catch (e) {} }
+  try {
+    const resp = await fetch(PLAYLIST); if (!resp.ok) throw new Error(resp.status);
+    const txt = await resp.text();
+    if (c) { try { await c.put(PLAYLIST, new Response(txt)); localStorage.setItem("plAt", String(Date.now())); } catch (e) {} }
+    return txt;
+  } catch (e) {
+    if (c) { try { const r = await c.match(PLAYLIST); if (r) return await r.text(); } catch (e2) {} }
+    throw e;
+  }
+}
+
 async function init() {
   try {
-    const [txt, fv, rc] = await Promise.all([fetch(PLAYLIST).then(r => r.text()), store.get("favs"), store.get("recent")]);
+    const [txt, fv, rc] = await Promise.all([getPlaylist(), store.get("favs"), store.get("recent")]);
     try { recent = JSON.parse(rc || "[]"); } catch (e) {}
     try { favs = new Set(JSON.parse(fv || "[]")); } catch (e) {}
     try { const d = JSON.parse(localStorage.getItem("dead") || "{}"); for (const k in d) if (Date.now() - d[k] < 43200000) dead.add(k); } catch (e) {}
     channels = parseM3U(txt).sort((a, b) => a.name.localeCompare(b.name));
     buildFilters();
     render();
-    openShared();
+    if (!openShared()) tryWelcome();
   } catch (e) {
     $("count").textContent = "Couldn't load channels. Check your connection and reopen the app.";
   }
@@ -215,38 +235,49 @@ function toggleFav(id) {
 
 function showMsg(t) { $("msg").style.display = t ? "block" : "none"; $("msg").textContent = t || ""; }
 
-function play(id) {
+function play(id, opts) {
   const ch = channels.find(c => c.id === id); if (!ch) return;
   state.playing = id; urls = streams[id].slice(); idx = 0;
-  pushRecent(id);
+  welcomeMode = !!(opts && opts.welcome); $("v").muted = welcomeMode;
+  if (!welcomeMode) pushRecent(id);
   $("player").classList.add("on");
-  $("nowname").textContent = ch.name;
+  $("nowname").textContent = (welcomeMode ? "📰 " : "") + ch.name;
   $("nowstar").classList.toggle("on", favs.has(id));
   window.scrollTo({top: 0, behavior: "smooth"});
   $("v").style.display = ch.native ? "none" : "block";
-  if (ch.native) { stop(); showMsg("This channel isn't available in the app right now. Try another one."); render(); return; }
+  if (ch.native) { stop(); showMsg("This channel isn't available in the app. Please try another channel."); render(); return; }
+  deadline = Date.now() + (welcomeMode ? 8000 : 30000);
   start(); render();
 }
 
 function stop() {
+  clearTimeout(wd);
   if (hls) { hls.destroy(); hls = null; }
   const v = $("v"); v.pause(); v.removeAttribute("src"); v.load();
 }
 
 function next() {
-  if (idx + 1 < urls.length) { idx++; start(); return; }
+  if (idx + 1 < urls.length && deadline - Date.now() > 1000) { idx++; start(); return; }
   stop();
   dead.add(state.playing);
   try { const d = JSON.parse(localStorage.getItem("dead") || "{}"); d[state.playing] = Date.now(); localStorage.setItem("dead", JSON.stringify(d)); } catch (e) {}
-  showMsg("This channel isn't working right now. It may be restricted in your region. Try another one.");
+  if (welcomeMode) { render(); return nextWelcome(); }
+  $("v").style.display = "none";
+  showMsg("This channel isn't available right now. Please try another channel.");
   render();
 }
 
 function start() {
   stop(); showMsg(urls.length > 1 ? `Connecting (source ${idx + 1} of ${urls.length})…` : "Connecting…");
   const v = $("v"), url = urls[idx];
-  const onPlaying = () => showMsg("");
+  const onPlaying = () => {
+    clearTimeout(wd);
+    if (welcomeMode) { try { localStorage.setItem("welcomeOK", state.playing); } catch (e) {} showMsg("👋 Welcome! Live news is on. Tap 🔇 for sound, or pick any channel."); }
+    else showMsg("");
+  };
   v.onplaying = onPlaying;
+  // if nothing is playing in time, try the next source, and give up when the 30 seconds are used
+  wd = setTimeout(next, Math.min(Math.max(8000, 30000 / urls.length), Math.max(deadline - Date.now(), 0)));
   if (window.Hls && Hls.isSupported()) {
     hls = new Hls({enableWorker: true, lowLatencyMode: true});
     hls.on(Hls.Events.ERROR, (_, d) => { if (d.fatal) next(); });
@@ -281,8 +312,9 @@ function shareChannel() {
 }
 function openShared() {
   let sp = ""; try { sp = (tg && tg.initDataUnsafe && tg.initDataUnsafe.start_param) || new URLSearchParams(location.search).get("s") || ""; } catch (e) {}
-  if (sp[0] !== "c" || sp.length < 2) return;
-  try { const id = unb64(sp.slice(1)); if (channels.some(c => c.id === id)) play(id); } catch (e) {}
+  if (sp[0] !== "c" || sp.length < 2) return false;
+  try { const id = unb64(sp.slice(1)); if (channels.some(c => c.id === id)) { play(id); return true; } } catch (e) {}
+  return false;
 }
 
 // Fullscreen (landscape where the device allows) and picture-in-picture
@@ -308,7 +340,41 @@ if (document.pictureInPictureEnabled || typeof $("v").webkitSetPresentationMode 
 function applyTheme() { document.documentElement.dataset.theme = (tg && tg.colorScheme) || (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark"); }
 applyTheme(); try { tg && tg.onEvent("themeChanged", applyTheme); } catch (e) {}
 
+// Welcome: open on a live news channel (muted). Tries up to 4, remembers the one that worked.
+function tryWelcome() {
+  const pool = channels.filter(c => c.categories.includes("news") && !c.native && !dead.has(c.id));
+  if (!pool.length) return;
+  let good = ""; try { good = localStorage.getItem("welcomeOK") || ""; } catch (e) {}
+  const mix = a => a.sort(() => Math.random() - 0.5);
+  const first = pool.filter(c => c.id === good);
+  const home = mix(pool.filter(c => c.id !== good && c.country === HOME));
+  const rest = mix(pool.filter(c => c.id !== good && c.country !== HOME));
+  welcomeQ = first.concat(home, rest).slice(0, 4).map(c => c.id);
+  nextWelcome();
+}
+function nextWelcome() {
+  const id = welcomeQ.shift();
+  if (id) return play(id, {welcome: true});
+  welcomeMode = false; stop(); state.playing = null; showMsg(""); $("player").classList.remove("on"); render();
+}
+
+// TV remote: previous / next channel in the list you're looking at
+function zap(d) {
+  const list = filtered().filter(c => !c.native && !dead.has(c.id));
+  if (!list.length) return;
+  let i = list.findIndex(c => c.id === state.playing);
+  i = i < 0 ? (d > 0 ? 0 : list.length - 1) : (i + d + list.length) % list.length;
+  try { tg.HapticFeedback.impactOccurred("light"); } catch (e) {}
+  play(list[i].id);
+}
+
 // Events
+$("prev").addEventListener("click", () => zap(-1));
+$("nxt").addEventListener("click", () => zap(1));
+$("mute").addEventListener("click", () => { const v = $("v"); v.muted = !v.muted; });
+$("v").addEventListener("volumechange", () => { $("mute").textContent = $("v").muted ? "🔇" : "🔊"; });
+$("q").addEventListener("focus", () => $("player").classList.add("compact"));
+$("q").addEventListener("blur", () => $("player").classList.remove("compact"));
 $("share").addEventListener("click", shareChannel);
 $("fs").addEventListener("click", goFull);
 $("pip").addEventListener("click", goPip);
@@ -330,7 +396,7 @@ $("list").addEventListener("click", e => {
 $("list").addEventListener("keydown", e => { if (e.key === "Enter") { const c = e.target.closest(".ch"); if (c) play(c.dataset.id); } });
 $("more").addEventListener("click", () => { state.shown += 60; render(); });
 $("nowstar").addEventListener("click", () => state.playing && toggleFav(state.playing));
-$("close").addEventListener("click", () => { stop(); state.playing = null; showMsg(""); $("player").classList.remove("on"); render(); });
+$("close").addEventListener("click", () => { welcomeMode = false; welcomeQ = []; stop(); state.playing = null; showMsg(""); $("player").classList.remove("on"); render(); });
 
 init();
 </script>
