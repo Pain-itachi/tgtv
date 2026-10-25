@@ -44,14 +44,24 @@ input:focus,select:focus,button:focus-visible{outline:2px solid var(--accent);ou
 .star.on{color:var(--accent)}
 .more{display:block;margin:0 auto 28px;padding:11px 22px;border-radius:10px;border:1px solid var(--line);background:var(--panel);color:var(--text);font:inherit;cursor:pointer}
 .empty{padding:40px 20px;text-align:center;color:var(--dim)}
+.now .star{font-size:19px;padding:4px 5px}
+.recent{padding:0 12px}
+.rh{font-size:12px;color:var(--dim);margin:2px 0 6px}
+.rrow{display:flex;gap:8px;overflow-x:auto;padding-bottom:8px;scrollbar-width:none}
+.rrow::-webkit-scrollbar{display:none}
+.rc{flex:none;width:72px;background:none;border:0;color:var(--text);font:inherit;font-size:11px;cursor:pointer;text-align:center}
+.rc img,.rc .ph{width:52px;height:52px;border-radius:12px;background:#fff;object-fit:contain;display:grid;margin:0 auto 4px}
+.rc span:last-child{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+:root[data-theme=light]{--bg:#f4f5f9;--panel:#ffffff;--line:#e1e4ee;--text:#151722;--dim:#666c82;color-scheme:light}
+:root[data-theme=light] .msg{color:#b45309}
+:root[data-theme=light] .logo,:root[data-theme=light] .rc img{border:1px solid var(--line)}
 </style>
 </head>
 <body>
 <div class="player" id="player">
   <video id="v" controls playsinline autoplay></video>
-  <div class="now"><i class="dot"></i><span id="nowname"></span><button class="star" id="nowstar" aria-label="Favorite">★</button><button class="star" id="close" aria-label="Close player">✕</button></div>
+  <div class="now"><i class="dot"></i><span id="nowname"></span><button class="star" id="share" aria-label="Share channel">📨</button><button class="star" id="pip" aria-label="Picture in picture" hidden>🗗</button><button class="star" id="fs" aria-label="Fullscreen">⛶</button><button class="star" id="nowstar" aria-label="Favorite">★</button><button class="star" id="close" aria-label="Close player">✕</button></div>
   <div class="msg" id="msg"></div>
-  <button class="more" id="copyList" hidden style="margin:10px 12px">Copy playlist link for VLC</button>
 </div>
 <header>
   <h1>Live TV</h1>
@@ -61,12 +71,15 @@ input:focus,select:focus,button:focus-visible{outline:2px solid var(--accent);ou
   </div>
 </header>
 <div class="chips" id="chips"></div>
+<div class="recent" id="recent"></div>
 <div class="count" id="count">Loading channels…</div>
 <div class="list" id="list"></div>
 <button class="more" id="more" hidden>Show more</button>
 
 <script>
 const PLAYLIST = "https://iptv-org.github.io/iptv/index.m3u";
+// ⚠️ Put your own app link here so the 📨 Share button works, e.g. "https://t.me/yourbotname/tv"
+const BOT_LINK = "https://t.me/TGTelebot/Aio";
 const tg = window.Telegram && window.Telegram.WebApp;
 try { tg && (tg.ready(), tg.expand()); } catch (e) {}
 
@@ -135,12 +148,14 @@ function parseM3U(text) {
 
 async function init() {
   try {
-    const [txt, fv] = await Promise.all([fetch(PLAYLIST).then(r => r.text()), store.get("favs")]);
+    const [txt, fv, rc] = await Promise.all([fetch(PLAYLIST).then(r => r.text()), store.get("favs"), store.get("recent")]);
+    try { recent = JSON.parse(rc || "[]"); } catch (e) {}
     try { favs = new Set(JSON.parse(fv || "[]")); } catch (e) {}
     try { const d = JSON.parse(localStorage.getItem("dead") || "{}"); for (const k in d) if (Date.now() - d[k] < 43200000) dead.add(k); } catch (e) {}
     channels = parseM3U(txt).sort((a, b) => a.name.localeCompare(b.name));
     buildFilters();
     render();
+    openShared();
   } catch (e) {
     $("count").textContent = "Couldn't load channels. Check your connection and reopen the app.";
   }
@@ -161,17 +176,20 @@ function buildFilters() {
   $("chips").innerHTML =
     `<button class="chip on" data-c="all">All ${channels.length}</button><button class="chip" data-c="__fav">★ Favorites</button>` +
     cats.map(k => `<button class="chip" data-c="${esc(k)}">${esc(label(k))}</button>`).join("") +
-    `<button class="chip" data-all="1">🔒 Show all</button><button class="chip" data-more="1">More ▾</button>`;
+    `<button class="chip" data-all="1">🔒 Show unavailable</button><button class="chip" data-more="1">More ▾</button>`;
 }
 
+const HOME = ((navigator.language || "").split("-")[1] || "").toUpperCase();
 function filtered() {
   const q = state.q.trim().toLowerCase();
-  return channels.filter(c =>
+  const r = channels.filter(c =>
     (state.all || (!c.native && !dead.has(c.id))) &&
     (!q || c.name.toLowerCase().includes(q)) &&
     (!state.country || c.country === state.country) &&
     (state.cat === "all" || (state.cat === "__fav" ? favs.has(c.id) : (c.categories || []).includes(state.cat)))
   );
+  if (HOME && !state.country && !q && state.cat === "all") return r.filter(c => c.country === HOME).concat(r.filter(c => c.country !== HOME));
+  return r;
 }
 
 function render() {
@@ -180,11 +198,12 @@ function render() {
   const html = list.slice(0, state.shown).map(c => {
     const logo = c.logo ? `<img class="logo" src="${esc(c.logo)}" alt="" loading="lazy" onerror="this.outerHTML='<div class=ph>${esc(c.name.charAt(0))}</div>'">` : `<div class="ph">${esc(c.name.charAt(0))}</div>`;
     return `<div class="ch${state.playing === c.id ? " play" : ""}" data-id="${esc(c.id)}" role="button" tabindex="0">${logo}
-      <div class="meta"><div class="name">${esc(c.name)}</div><div class="sub">${esc(c.country ? regionName(c.country) : "International")}${c.native ? " · 🔒 VLC only" : ""}</div></div>
+      <div class="meta"><div class="name">${esc(c.name)}</div><div class="sub">${esc(c.country ? regionName(c.country) : "International")}${c.native ? " · 🔒 Unavailable" : ""}</div></div>
       <button class="star${favs.has(c.id) ? " on" : ""}" data-fav="${esc(c.id)}" aria-label="Favorite">★</button></div>`;
   }).join("");
   $("list").innerHTML = html || `<div class="empty">${state.cat === "__fav" ? "No favorites yet. Tap ★ on a channel to save it." : "No channels match your search."}</div>`;
   $("more").hidden = list.length <= state.shown;
+  renderRecent();
 }
 
 function toggleFav(id) {
@@ -199,13 +218,13 @@ function showMsg(t) { $("msg").style.display = t ? "block" : "none"; $("msg").te
 function play(id) {
   const ch = channels.find(c => c.id === id); if (!ch) return;
   state.playing = id; urls = streams[id].slice(); idx = 0;
+  pushRecent(id);
   $("player").classList.add("on");
   $("nowname").textContent = ch.name;
   $("nowstar").classList.toggle("on", favs.has(id));
   window.scrollTo({top: 0, behavior: "smooth"});
   $("v").style.display = ch.native ? "none" : "block";
-  $("copyList").hidden = !ch.native;
-  if (ch.native) { stop(); showMsg("This channel can't play inside Telegram because it needs special headers or isn't secure. Open the full playlist in VLC to watch it."); render(); return; }
+  if (ch.native) { stop(); showMsg("This channel isn't available in the app right now. Try another one."); render(); return; }
   start(); render();
 }
 
@@ -219,8 +238,7 @@ function next() {
   stop();
   dead.add(state.playing);
   try { const d = JSON.parse(localStorage.getItem("dead") || "{}"); d[state.playing] = Date.now(); localStorage.setItem("dead", JSON.stringify(d)); } catch (e) {}
-  showMsg("This channel isn't working here. It may be geo-restricted or need a native player like VLC.");
-  $("copyList").hidden = false;
+  showMsg("This channel isn't working right now. It may be restricted in your region. Try another one.");
   render();
 }
 
@@ -233,13 +251,68 @@ function start() {
     hls = new Hls({enableWorker: true, lowLatencyMode: true});
     hls.on(Hls.Events.ERROR, (_, d) => { if (d.fatal) next(); });
     hls.loadSource(url); hls.attachMedia(v);
-    v.play().catch(() => {});
+    v.play().catch(() => showMsg("Tap ▶ to start playing."));
   } else if (v.canPlayType("application/vnd.apple.mpegurl")) {
     v.src = url; v.onerror = next; v.play().catch(() => {});
   } else { showMsg("This device can't play live streams."); }
 }
 
+let recent = [];
+function pushRecent(id) { recent = [id, ...recent.filter(x => x !== id)].slice(0, 12); store.set("recent", JSON.stringify(recent)); }
+function renderRecent() {
+  const show = state.cat === "all" && !state.q && !state.country;
+  const items = show ? recent.map(id => channels.find(c => c.id === id)).filter(c => c && !c.native && !dead.has(c.id)) : [];
+  $("recent").innerHTML = items.length ? '<div class="rh">Recently watched</div><div class="rrow">' + items.map(c =>
+    `<button class="rc" data-id="${esc(c.id)}">${c.logo ? `<img src="${esc(c.logo)}" alt="" loading="lazy" onerror="this.style.visibility='hidden'">` : `<span class="ph">${esc(c.name.charAt(0))}</span>`}<span>${esc(c.name)}</span></button>`).join("") + "</div>" : "";
+}
+
+// Share a channel: opens Telegram's share sheet with a link that starts the app on that channel
+const b64 = s => btoa(unescape(encodeURIComponent(s))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+const unb64 = s => { s = s.replace(/-/g, "+").replace(/_/g, "/"); return decodeURIComponent(escape(atob(s + "=".repeat((4 - s.length % 4) % 4)))); };
+function shareChannel() {
+  const ch = channels.find(c => c.id === state.playing); if (!ch) return;
+  if (BOT_LINK.includes("YOUR_BOT")) { showMsg("Sharing isn't set up yet: open index.html and put your app link in BOT_LINK."); return; }
+  const p = "c" + b64(ch.id);
+  const link = p.length <= 64 ? `${BOT_LINK}?startapp=${p}` : BOT_LINK;
+  const text = `📺 ${ch.name} is live. Watch it free in Telegram`;
+  const url = `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent(text)}`;
+  try { if (tg && tg.openTelegramLink) return tg.openTelegramLink(url); } catch (e) {}
+  window.open(url, "_blank");
+}
+function openShared() {
+  let sp = ""; try { sp = (tg && tg.initDataUnsafe && tg.initDataUnsafe.start_param) || new URLSearchParams(location.search).get("s") || ""; } catch (e) {}
+  if (sp[0] !== "c" || sp.length < 2) return;
+  try { const id = unb64(sp.slice(1)); if (channels.some(c => c.id === id)) play(id); } catch (e) {}
+}
+
+// Fullscreen (landscape where the device allows) and picture-in-picture
+async function goFull() {
+  const v = $("v");
+  try {
+    if (v.requestFullscreen) { await v.requestFullscreen(); try { await screen.orientation.lock("landscape"); } catch (e) {} }
+    else if (v.webkitEnterFullscreen) v.webkitEnterFullscreen();
+  } catch (e) {}
+}
+document.addEventListener("fullscreenchange", () => { if (!document.fullscreenElement) { try { screen.orientation.unlock(); } catch (e) {} } });
+async function goPip() {
+  const v = $("v");
+  try {
+    if (document.pictureInPictureElement) await document.exitPictureInPicture();
+    else if (v.requestPictureInPicture) await v.requestPictureInPicture();
+    else if (v.webkitSetPresentationMode) v.webkitSetPresentationMode("picture-in-picture");
+  } catch (e) { showMsg("Picture-in-picture isn't available on this device."); }
+}
+if (document.pictureInPictureEnabled || typeof $("v").webkitSetPresentationMode === "function") $("pip").hidden = false;
+
+// Follow Telegram's light/dark theme
+function applyTheme() { document.documentElement.dataset.theme = (tg && tg.colorScheme) || (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark"); }
+applyTheme(); try { tg && tg.onEvent("themeChanged", applyTheme); } catch (e) {}
+
 // Events
+$("share").addEventListener("click", shareChannel);
+$("fs").addEventListener("click", goFull);
+$("pip").addEventListener("click", goPip);
+$("recent").addEventListener("click", e => { const b = e.target.closest(".rc"); if (b) play(b.dataset.id); });
 $("q").addEventListener("input", e => { state.q = e.target.value; state.shown = 60; render(); });
 $("country").addEventListener("change", e => { state.country = e.target.value; state.shown = 60; render(); });
 $("chips").addEventListener("click", e => {
@@ -256,10 +329,6 @@ $("list").addEventListener("click", e => {
 });
 $("list").addEventListener("keydown", e => { if (e.key === "Enter") { const c = e.target.closest(".ch"); if (c) play(c.dataset.id); } });
 $("more").addEventListener("click", () => { state.shown += 60; render(); });
-$("copyList").addEventListener("click", () => {
-  const done = () => showMsg("Playlist link copied. In VLC: Media → Open Network Stream → paste it.");
-  try { navigator.clipboard.writeText(PLAYLIST).then(done, done); } catch (e) { done(); }
-});
 $("nowstar").addEventListener("click", () => state.playing && toggleFav(state.playing));
 $("close").addEventListener("click", () => { stop(); state.playing = null; showMsg(""); $("player").classList.remove("on"); render(); });
 
