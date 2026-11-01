@@ -61,9 +61,15 @@ input:focus,select:focus,button:focus-visible{outline:2px solid var(--accent);ou
 .now .star{padding:6px 8px}
 .star svg{display:block}
 .player.compact video{max-height:24vh}
+#gate{position:fixed;inset:0;z-index:20;background:rgba(10,11,18,.96);display:grid;place-items:center;text-align:center;padding:24px;cursor:pointer}
+#gate[hidden]{display:none}
+#gate h2{font-size:30px;font-weight:800;color:#fff;margin-bottom:6px}
+#gate p{color:#9096ab;margin-bottom:22px;font-size:14px}
+#gate button{background:var(--accent);color:#1a1300;border:0;border-radius:99px;padding:16px 30px;font:inherit;font-size:18px;font-weight:800;cursor:pointer;box-shadow:0 6px 24px rgba(255,194,51,.35)}
 </style>
 </head>
 <body>
+<div id="gate" hidden><div><h2>Live TV</h2><p>Your phone needs one tap to play sound.</p><button id="gateBtn">🔊 Tap to start</button></div></div>
 <div class="player" id="player">
   <video id="v" controls playsinline autoplay></video>
   <div class="now"><div class="nl"><i class="dot"></i><span id="nowname"></span></div><div class="ctl"><button class="star" id="prev" aria-label="Previous channel">⏮</button><button class="star" id="nxt" aria-label="Next channel">⏭</button><button class="star" id="mute" aria-label="Sound">🔊</button><button class="star" id="share" aria-label="Share channel"><svg viewBox="0 0 447 447" width="20" height="20" fill="none" stroke="currentColor" stroke-width="26" stroke-linejoin="round" stroke-linecap="round" aria-hidden="true"><path d="M14 190 L433 14 L258 430 L172 270 Z M172 270 L433 14"/></svg></button><button class="star" id="pip" aria-label="Picture in picture" hidden>🗗</button><button class="star" id="fs" aria-label="Fullscreen">⛶</button><button class="star" id="nowstar" aria-label="Favorite">★</button><button class="star" id="close" aria-label="Close player">✕</button></div></div>
@@ -239,7 +245,7 @@ function showMsg(t) { $("msg").style.display = t ? "block" : "none"; $("msg").te
 function play(id, opts) {
   const ch = channels.find(c => c.id === id); if (!ch) return;
   state.playing = id; urls = streams[id].slice(); idx = 0;
-  welcomeMode = !!(opts && opts.welcome); $("v").muted = welcomeMode;
+  welcomeMode = !!(opts && opts.welcome); $("v").muted = false; $("v").volume = 1;
   if (!welcomeMode) pushRecent(id);
   $("player").classList.add("on");
   $("nowname").textContent = (welcomeMode ? "🎵 " : "") + ch.name;
@@ -273,8 +279,8 @@ function start() {
   const v = $("v"), url = urls[idx];
   const onPlaying = () => {
     clearTimeout(wd);
-    if (welcomeMode) { try { localStorage.setItem("welcomeOK2", state.playing); } catch (e) {} showMsg("👋 Welcome! Music is on. Tap 🔇 for sound, or pick any channel."); }
-    else showMsg("");
+    if (welcomeMode) { try { localStorage.setItem("welcomeOK2", state.playing); } catch (e) {} }
+    showMsg("");
   };
   v.onplaying = onPlaying;
   // if nothing is playing in time, try the next source, and give up when the 30 seconds are used
@@ -283,7 +289,7 @@ function start() {
   const native = () => {
     if (hls) { hls.destroy(); hls = null; }
     v.onerror = () => { lastErr = lastErr || ("native " + (v.error ? v.error.code : "?")); next(); };
-    v.src = url; v.play().catch(() => showMsg("Tap ▶ to start playing."));
+    v.src = url; tryPlay(v);
   };
   if (window.Hls && Hls.isSupported()) {
     hls = new Hls({enableWorker: true, lowLatencyMode: true});
@@ -293,12 +299,27 @@ function start() {
       if (mp) native(); else next();
     });
     hls.loadSource(url); hls.attachMedia(v);
-    v.play().catch(() => showMsg("Tap ▶ to start playing."));
+    tryPlay(v);
   } else if (mp) {
     v.onerror = () => { lastErr = "native " + (v.error ? v.error.code : "?"); next(); };
-    v.src = url; v.play().catch(() => {});
+    v.src = url; tryPlay(v);
   } else { lastErr = "unsupported"; showMsg("This device can't play live streams."); }
 }
+
+// Try to play with sound. Where the phone allows it, the intro plays with sound straight away.
+// If the phone blocks sound until the first tap, show a one-tap start screen; the tap starts the channel with sound.
+function tryPlay(v) {
+  return v.play().catch(err => {
+    if (err && err.name === "NotAllowedError") {
+      if (welcomeMode) { clearTimeout(wd); $("gate").hidden = false; }
+      else showMsg("Tap ▶ to start playing.");
+    }
+  });
+}
+$("gate").addEventListener("click", () => {
+  $("gate").hidden = true;
+  if (state.playing && welcomeMode) { deadline = Date.now() + 8000; start(); } // started by the tap, so sound is allowed
+});
 
 let recent = [];
 function pushRecent(id) { recent = [id, ...recent.filter(x => x !== id)].slice(0, 12); store.set("recent", JSON.stringify(recent)); }
@@ -352,17 +373,19 @@ if (document.pictureInPictureEnabled || typeof $("v").webkitSetPresentationMode 
 function applyTheme() { document.documentElement.dataset.theme = (tg && tg.colorScheme) || (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark"); }
 applyTheme(); try { tg && tg.onEvent("themeChanged", applyTheme); } catch (e) {}
 
-// Welcome: open on Trace Urban (muted). If it isn't available, try other Trace channels, then any music channel.
+// Welcome: open on "Trace Urban International HD (1080p)" (muted). If that exact channel isn't available,
+// try other Trace Urban International versions, then Trace Urban, other Trace channels, then any music channel.
 function tryWelcome() {
   const ok = c => !c.native && !dead.has(c.id);
-  const urban = channels.filter(c => ok(c) && /trace\s*urban/i.test(c.name));
-  const trace = channels.filter(c => ok(c) && /trace/i.test(c.name) && !urban.includes(c));
-  const music = channels.filter(c => ok(c) && c.categories.includes("music") && !urban.includes(c) && !trace.includes(c));
-  const mix = a => a.sort(() => Math.random() - 0.5);
-  let good = ""; try { good = localStorage.getItem("welcomeOK2") || ""; } catch (e) {}
-  const all = urban.concat(trace, mix(music));
-  const first = all.filter(c => c.id === good); // only reuse the remembered channel if it is still a valid pick
-  welcomeQ = first.concat(all.filter(c => c.id !== good)).slice(0, 4).map(c => c.id);
+  const norm = x => x.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const exact = channels.filter(c => ok(c) && norm(c.name) === "trace urban international hd 1080p");
+  const used = new Set(exact);
+  const take = fn => { const r = channels.filter(c => ok(c) && !used.has(c) && fn(c)); r.forEach(c => used.add(c)); return r; };
+  const intl = take(c => /trace\s*urban\s*international/i.test(c.name)).sort((a, b) => /1080/.test(b.name) - /1080/.test(a.name));
+  const urban = take(c => /trace\s*urban/i.test(c.name));
+  const trace = take(c => /trace/i.test(c.name));
+  const music = take(c => c.categories.includes("music")).sort(() => Math.random() - 0.5);
+  welcomeQ = exact.concat(intl, urban, trace, music).slice(0, 4).map(c => c.id);
   if (!welcomeQ.length) return;
   nextWelcome();
 }
