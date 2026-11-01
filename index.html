@@ -352,19 +352,17 @@ if (document.pictureInPictureEnabled || typeof $("v").webkitSetPresentationMode 
 function applyTheme() { document.documentElement.dataset.theme = (tg && tg.colorScheme) || (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark"); }
 applyTheme(); try { tg && tg.onEvent("themeChanged", applyTheme); } catch (e) {}
 
-// Welcome: open on "Trace Urban International HD (1080p)" (muted). If that exact channel isn't available,
-// try other Trace Urban International versions, then Trace Urban, other Trace channels, then any music channel.
+// Welcome: open on Trace Urban (muted). If it isn't available, try other Trace channels, then any music channel.
 function tryWelcome() {
   const ok = c => !c.native && !dead.has(c.id);
-  const norm = x => x.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-  const exact = channels.filter(c => ok(c) && norm(c.name) === "trace urban international hd 1080p");
-  const used = new Set(exact);
-  const take = fn => { const r = channels.filter(c => ok(c) && !used.has(c) && fn(c)); r.forEach(c => used.add(c)); return r; };
-  const intl = take(c => /trace\s*urban\s*international/i.test(c.name)).sort((a, b) => /1080/.test(b.name) - /1080/.test(a.name));
-  const urban = take(c => /trace\s*urban/i.test(c.name));
-  const trace = take(c => /trace/i.test(c.name));
-  const music = take(c => c.categories.includes("music")).sort(() => Math.random() - 0.5);
-  welcomeQ = exact.concat(intl, urban, trace, music).slice(0, 4).map(c => c.id);
+  const urban = channels.filter(c => ok(c) && /trace\s*urban/i.test(c.name));
+  const trace = channels.filter(c => ok(c) && /trace/i.test(c.name) && !urban.includes(c));
+  const music = channels.filter(c => ok(c) && c.categories.includes("music") && !urban.includes(c) && !trace.includes(c));
+  const mix = a => a.sort(() => Math.random() - 0.5);
+  let good = ""; try { good = localStorage.getItem("welcomeOK2") || ""; } catch (e) {}
+  const all = urban.concat(trace, mix(music));
+  const first = all.filter(c => c.id === good); // only reuse the remembered channel if it is still a valid pick
+  welcomeQ = first.concat(all.filter(c => c.id !== good)).slice(0, 4).map(c => c.id);
   if (!welcomeQ.length) return;
   nextWelcome();
 }
