@@ -109,7 +109,7 @@ const regionName = (() => { try { const d = new Intl.DisplayNames(["en"], {type:
 
 let channels = [], streams = {}, favs = new Set(), dead = new Set();
 let state = {q: "", country: "", cat: "all", shown: 60, playing: null, all: false};
-let hls = null, urls = [], idx = 0, wd = null, deadline = 0, welcomeMode = false, welcomeQ = [];
+let hls = null, urls = [], idx = 0, wd = null, deadline = 0, welcomeMode = false, welcomeQ = [], lastErr = "";
 
 function parseM3U(text) {
   const map = new Map(), up = {};
@@ -242,19 +242,19 @@ function play(id, opts) {
   welcomeMode = !!(opts && opts.welcome); $("v").muted = welcomeMode;
   if (!welcomeMode) pushRecent(id);
   $("player").classList.add("on");
-  $("nowname").textContent = (welcomeMode ? "📰 " : "") + ch.name;
+  $("nowname").textContent = (welcomeMode ? "🎵 " : "") + ch.name;
   $("nowstar").classList.toggle("on", favs.has(id));
   window.scrollTo({top: 0, behavior: "smooth"});
   $("v").style.display = ch.native ? "none" : "block";
   if (ch.native) { stop(); showMsg("This channel isn't available in the app. Please try another channel."); render(); return; }
-  deadline = Date.now() + (welcomeMode ? 8000 : 30000);
+  deadline = Date.now() + (welcomeMode ? 8000 : 30000); lastErr = "";
   start(); render();
 }
 
 function stop() {
   clearTimeout(wd);
   if (hls) { hls.destroy(); hls = null; }
-  const v = $("v"); v.pause(); v.removeAttribute("src"); v.load();
+  const v = $("v"); v.onerror = null; v.pause(); v.removeAttribute("src"); v.load();
 }
 
 function next() {
@@ -264,7 +264,7 @@ function next() {
   try { const d = JSON.parse(localStorage.getItem("dead") || "{}"); d[state.playing] = Date.now(); localStorage.setItem("dead", JSON.stringify(d)); } catch (e) {}
   if (welcomeMode) { render(); return nextWelcome(); }
   $("v").style.display = "none";
-  showMsg("This channel isn't available right now. Please try another channel.");
+  showMsg("This channel isn't available right now. Please try another channel." + (lastErr ? " (" + lastErr + ")" : ""));
   render();
 }
 
@@ -273,20 +273,31 @@ function start() {
   const v = $("v"), url = urls[idx];
   const onPlaying = () => {
     clearTimeout(wd);
-    if (welcomeMode) { try { localStorage.setItem("welcomeOK", state.playing); } catch (e) {} showMsg("👋 Welcome! Live news is on. Tap 🔇 for sound, or pick any channel."); }
+    if (welcomeMode) { try { localStorage.setItem("welcomeOK2", state.playing); } catch (e) {} showMsg("👋 Welcome! Music is on. Tap 🔇 for sound, or pick any channel."); }
     else showMsg("");
   };
   v.onplaying = onPlaying;
   // if nothing is playing in time, try the next source, and give up when the 30 seconds are used
   wd = setTimeout(next, Math.min(Math.max(8000, 30000 / urls.length), Math.max(deadline - Date.now(), 0)));
+  const mp = v.canPlayType("application/vnd.apple.mpegurl");
+  const native = () => {
+    if (hls) { hls.destroy(); hls = null; }
+    v.onerror = () => { lastErr = lastErr || ("native " + (v.error ? v.error.code : "?")); next(); };
+    v.src = url; v.play().catch(() => showMsg("Tap ▶ to start playing."));
+  };
   if (window.Hls && Hls.isSupported()) {
     hls = new Hls({enableWorker: true, lowLatencyMode: true});
-    hls.on(Hls.Events.ERROR, (_, d) => { if (d.fatal) next(); });
+    hls.on(Hls.Events.ERROR, (_, d) => {
+      if (!d.fatal) return;
+      lastErr = d.response && d.response.code ? "HTTP " + d.response.code : (d.details || "error");
+      if (mp) native(); else next();
+    });
     hls.loadSource(url); hls.attachMedia(v);
     v.play().catch(() => showMsg("Tap ▶ to start playing."));
-  } else if (v.canPlayType("application/vnd.apple.mpegurl")) {
-    v.src = url; v.onerror = next; v.play().catch(() => {});
-  } else { showMsg("This device can't play live streams."); }
+  } else if (mp) {
+    v.onerror = () => { lastErr = "native " + (v.error ? v.error.code : "?"); next(); };
+    v.src = url; v.play().catch(() => {});
+  } else { lastErr = "unsupported"; showMsg("This device can't play live streams."); }
 }
 
 let recent = [];
@@ -341,16 +352,20 @@ if (document.pictureInPictureEnabled || typeof $("v").webkitSetPresentationMode 
 function applyTheme() { document.documentElement.dataset.theme = (tg && tg.colorScheme) || (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark"); }
 applyTheme(); try { tg && tg.onEvent("themeChanged", applyTheme); } catch (e) {}
 
-// Welcome: open on a live news channel (muted). Tries up to 4, remembers the one that worked.
+// Welcome: open on "Trace Urban International HD (1080p)" (muted). If that exact channel isn't available,
+// try other Trace Urban International versions, then Trace Urban, other Trace channels, then any music channel.
 function tryWelcome() {
-  const pool = channels.filter(c => c.categories.includes("news") && !c.native && !dead.has(c.id));
-  if (!pool.length) return;
-  let good = ""; try { good = localStorage.getItem("welcomeOK") || ""; } catch (e) {}
-  const mix = a => a.sort(() => Math.random() - 0.5);
-  const first = pool.filter(c => c.id === good);
-  const home = mix(pool.filter(c => c.id !== good && c.country === HOME));
-  const rest = mix(pool.filter(c => c.id !== good && c.country !== HOME));
-  welcomeQ = first.concat(home, rest).slice(0, 4).map(c => c.id);
+  const ok = c => !c.native && !dead.has(c.id);
+  const norm = x => x.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const exact = channels.filter(c => ok(c) && norm(c.name) === "trace urban international hd 1080p");
+  const used = new Set(exact);
+  const take = fn => { const r = channels.filter(c => ok(c) && !used.has(c) && fn(c)); r.forEach(c => used.add(c)); return r; };
+  const intl = take(c => /trace\s*urban\s*international/i.test(c.name)).sort((a, b) => /1080/.test(b.name) - /1080/.test(a.name));
+  const urban = take(c => /trace\s*urban/i.test(c.name));
+  const trace = take(c => /trace/i.test(c.name));
+  const music = take(c => c.categories.includes("music")).sort(() => Math.random() - 0.5);
+  welcomeQ = exact.concat(intl, urban, trace, music).slice(0, 4).map(c => c.id);
+  if (!welcomeQ.length) return;
   nextWelcome();
 }
 function nextWelcome() {
