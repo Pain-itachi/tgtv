@@ -66,6 +66,7 @@ input:focus,select:focus,button:focus-visible{outline:2px solid var(--accent);ou
 #gate h2{font-size:30px;font-weight:800;color:#fff;margin-bottom:6px}
 #gate p{color:#9096ab;margin-bottom:22px;font-size:14px}
 #gate button{background:var(--accent);color:#1a1300;border:0;border-radius:99px;padding:16px 30px;font:inherit;font-size:18px;font-weight:800;cursor:pointer;box-shadow:0 6px 24px rgba(255,194,51,.35)}
+.sec{grid-column:1/-1;font-weight:800;font-size:15px;padding:8px 2px 0}
 </style>
 </head>
 <body>
@@ -207,6 +208,28 @@ function buildFilters() {
 }
 
 const HOME = ((navigator.language || "").split("-")[1] || "").toUpperCase();
+// Well-known channels that are usually free to watch (pay-TV brands are left out on purpose)
+const FAMOUS = {
+  movies: /cinema|movie|film|kino|cine|horror|thriller|western|classic/i,
+  sports: /red bull tv|eurosport|fifa|olympic|arena sport|sportitalia|tennis channel|motogp|stadium|sports? ?tv|fight|ufc|wwe|golf channel|trace sport/i,
+  news: /bbc news|cnn|al ?jazeera|france 24|\bdw\b|euronews|sky news|bloomberg|cnbc|nhk world|trt world|cgtn|abc news|nbc news|cbs news|newsmax|i24|arirang|channel news asia|wion|rai news|tg ?24|tagesschau|\bwelt\b|bfm|lci/i,
+  anime: /anime|animax|crunchyroll|toonami|tokyo mx|ani-?one|muse asia|naruto|pokemon|dragon ?ball|one piece|gundam|doraemon/i
+};
+const MIX = ["movies", "sports", "news", "anime"], PER = 8;
+const inCat = (c, k) => k === "movies" ? (c.categories.includes("movies") || FAMOUS.movies.test(c.name))
+  : k === "anime" ? (c.categories.includes("anime") || c.categories.includes("animation") || FAMOUS.anime.test(c.name)) : c.categories.includes(k);
+const flagged = c => /\[(geo-?blocked|not 24\/7)\]/i.test(c.name); // the playlist itself marks these
+let FEAT = 0; // how many "popular" channels are at the top of the home list
+
+function homeOrder(r) {
+  const score = (c, k) => (FAMOUS[k].test(c.name) ? 100 : 0) + (c.country === HOME ? 25 : 0) + (c.logo ? 10 : 0) + (streams[c.id].length > 1 ? 5 : 0);
+  const lists = MIX.map(k => r.filter(c => !flagged(c) && inCat(c, k)).sort((a, b) => score(b, k) - score(a, k) || a.name.localeCompare(b.name)).slice(0, PER));
+  const used = new Set(), out = [];
+  for (let i = 0; i < PER; i++) lists.forEach(l => { const c = l[i]; if (c && !used.has(c.id)) { used.add(c.id); out.push(c); } }); // one of each kind in turn
+  FEAT = out.length;
+  const rest = r.filter(c => !used.has(c.id)).sort((a, b) => (flagged(a) - flagged(b)) || ((b.country === HOME) - (a.country === HOME)) || a.name.localeCompare(b.name));
+  return out.concat(rest);
+}
 function filtered() {
   const q = state.q.trim().toLowerCase();
   const r = channels.filter(c =>
@@ -215,16 +238,17 @@ function filtered() {
     (!state.country || c.country === state.country) &&
     (state.cat === "all" || (state.cat === "__fav" ? favs.has(c.id) : (c.categories || []).includes(state.cat)))
   );
-  if (HOME && !state.country && !q && state.cat === "all") return r.filter(c => c.country === HOME).concat(r.filter(c => c.country !== HOME));
-  return r;
+  if (!state.country && !q && state.cat === "all") return homeOrder(r);
+  FEAT = 0; return r;
 }
 
 function render() {
   const list = filtered();
   $("count").textContent = list.length + " channel" + (list.length === 1 ? "" : "s");
-  const html = list.slice(0, state.shown).map(c => {
+  const html = list.slice(0, state.shown).map((c, i) => {
+    const head = FEAT ? (i === 0 ? '<div class="sec">🔥 Popular now</div>' : i === FEAT ? '<div class="sec">All channels</div>' : "") : "";
     const logo = c.logo ? `<img class="logo" src="${esc(c.logo)}" alt="" loading="lazy" onerror="this.outerHTML='<div class=ph>${esc(c.name.charAt(0))}</div>'">` : `<div class="ph">${esc(c.name.charAt(0))}</div>`;
-    return `<div class="ch${state.playing === c.id ? " play" : ""}" data-id="${esc(c.id)}" role="button" tabindex="0">${logo}
+    return head + `<div class="ch${state.playing === c.id ? " play" : ""}" data-id="${esc(c.id)}" role="button" tabindex="0">${logo}
       <div class="meta"><div class="name">${esc(c.name)}</div><div class="sub">${esc(c.country ? regionName(c.country) : "International")}${c.native ? " · 🔒 Unavailable" : ""}</div></div>
       <button class="star${favs.has(c.id) ? " on" : ""}" data-fav="${esc(c.id)}" aria-label="Favorite">★</button></div>`;
   }).join("");
